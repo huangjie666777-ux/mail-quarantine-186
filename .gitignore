@@ -1,0 +1,9 @@
+.env
+.env.*
+*.key
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+/bin/
+/coverage*

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,9 +32,15 @@ func NewHTTPServer(config Config, store *Store) *HTTPServer {
 		})
 	})
 
+	r.Get("/api/rules", h.getRules)
+	r.Put("/api/rules", h.replaceRules)
+	r.Get("/api/quarantine", h.listAllQuarantine)
 	r.Get("/api/recipients/{recipient}/messages", h.list)
 	r.Get("/api/recipients/{recipient}/messages/{id}", h.get)
 	r.Get("/api/recipients/{recipient}/messages/{id}/eml", h.eml)
+	r.Get("/api/recipients/{recipient}/quarantine", h.listQuarantine)
+	r.Post("/api/recipients/{recipient}/messages/{id}/release", h.release)
+	r.Post("/api/recipients/{recipient}/messages/{id}/discard", h.discard)
 
 	semaphore := make(chan struct{}, config.MaxConns)
 	var rejected sync.Map
@@ -79,6 +87,113 @@ func (h *HTTPServer) Shutdown(ctx context.Context) error {
 type httpHandlers struct {
 	store  *Store
 	config Config
+}
+
+type replaceRulesRequest struct {
+	ExpectedVersion int64  `json:"expected_version"`
+	Rules           []Rule `json:"rules"`
+}
+
+func (h *httpHandlers) getRules(w http.ResponseWriter, r *http.Request) {
+	rules, err := h.store.GetRules(r.Context())
+	if err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, rules)
+}
+
+func (h *httpHandlers) replaceRules(w http.ResponseWriter, r *http.Request) {
+	var request replaceRulesRequest
+	if err := decodeJSONBody(r, &request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rules, err := h.store.ReplaceRules(r.Context(), request.ExpectedVersion, request.Rules)
+	if err == ErrStaleRules {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "stale rules version"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rules)
+}
+
+func decodeJSONBody(r *http.Request, value any) error {
+	defer r.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("request body too large")
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return fmt.Errorf("JSON body is required")
+	}
+	if err := json.Unmarshal(raw, value); err != nil {
+		return fmt.Errorf("invalid JSON body")
+	}
+	return nil
+}
+
+func (h *httpHandlers) listAllQuarantine(w http.ResponseWriter, r *http.Request) {
+	items, err := h.store.ListQuarantine(r.Context(), "")
+	if err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (h *httpHandlers) listQuarantine(w http.ResponseWriter, r *http.Request) {
+	recipient, ok := h.recipient(w, r)
+	if !ok {
+		return
+	}
+	items, err := h.store.ListQuarantine(r.Context(), recipient)
+	if err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (h *httpHandlers) release(w http.ResponseWriter, r *http.Request) {
+	h.decide(w, r, StatusReleased)
+}
+
+func (h *httpHandlers) discard(w http.ResponseWriter, r *http.Request) {
+	h.decide(w, r, StatusDiscarded)
+}
+
+func (h *httpHandlers) decide(w http.ResponseWriter, r *http.Request, decision string) {
+	recipient, ok := h.recipient(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if !validMessageID(id) {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
+	item, found, err := h.store.DecideQuarantine(r.Context(), id, recipient, decision)
+	if err == ErrConflictDecision {
+		writeJSON(w, http.StatusConflict, item)
+		return
+	}
+	if err == ErrNotQuarantined {
+		writeJSON(w, http.StatusConflict, item)
+		return
+	}
+	if err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (h *httpHandlers) recipient(w http.ResponseWriter, r *http.Request) (string, bool) {

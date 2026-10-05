@@ -19,7 +19,7 @@ func testConfig(t *testing.T) Config {
 		SMTPAddr:      "127.0.0.1:0",
 		HTTPAddr:      "127.0.0.1:0",
 		DBPath:        filepath.Join(t.TempDir(), "mail.db"),
-		Recipients:    map[string]struct{}{"user.Name@example.com": {}},
+		Recipients:    map[string]struct{}{"user.Name@example.com": {}, "qa@example.com": {}},
 		MaxConns:      4,
 		ReadTimeout:   2 * time.Second,
 		MaxLineBytes:  200,
@@ -248,4 +248,30 @@ func TestSMTPOptionalMailParameters(t *testing.T) {
 	if err != nil || empty != "" {
 		t.Fatalf("empty sender=%q err=%v", empty, err)
 	}
+}
+
+func TestSMTPRSETAndQUITRejectExtraArguments(t *testing.T) {
+	config := testConfig(t)
+	store, err := NewStore(config.DBPath, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	_, conn, reader := dialSMTPServer(t, config, store)
+	sendSMTP(t, conn, reader, "250", "EHLO client.example\r\nMAIL FROM:<sender@example.org>\r\nRCPT TO:<user.Name@example.com>\r\n")
+	for range 3 {
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sendSMTP(t, conn, reader, "501", "RSET extra\r\n")
+	sendSMTP(t, conn, reader, "354", "DATA\r\n")
+	if _, err := conn.Write([]byte("\r\n.\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if reply, err := reader.ReadString('\n'); err != nil || !strings.HasPrefix(reply, "250 queued as ") {
+		t.Fatalf("queued=%q err=%v", reply, err)
+	}
+	sendSMTP(t, conn, reader, "501", "QUIT extra\r\n")
+	sendSMTP(t, conn, reader, "221", "QUIT\r\n")
 }

@@ -235,37 +235,43 @@ func (s *POP3Server) handle(conn net.Conn) {
 			session.messages[index].deleted = true
 			s.reply(conn, "+OK message deleted")
 		case "RSET":
-			if !s.requireAuth(conn, session) {
+			if argument != "" {
+				s.reply(conn, "-ERR RSET takes no arguments")
+			} else if !s.requireAuth(conn, session) {
 				break
+			} else {
+				for index := range session.messages {
+					session.messages[index].deleted = false
+				}
+				s.reply(conn, "+OK deletion marks cleared")
 			}
-			for index := range session.messages {
-				session.messages[index].deleted = false
-			}
-			s.reply(conn, "+OK deletion marks cleared")
 		case "NOOP":
 			if !s.requireAuth(conn, session) {
 				break
 			}
 			s.reply(conn, "+OK")
 		case "QUIT":
-			if !session.authed {
+			if argument != "" {
+				s.reply(conn, "-ERR QUIT takes no arguments")
+			} else if !session.authed {
+				s.reply(conn, "+OK goodbye")
+				return
+			} else {
+				marked := make([]string, 0)
+				for _, message := range session.messages {
+					if message.deleted {
+						marked = append(marked, message.id)
+					}
+				}
+				if len(marked) > 0 {
+					if err := s.store.DeleteForRecipient(context.Background(), session.lockedUser, marked); err != nil {
+						s.reply(conn, "-ERR could not commit deletions")
+						return
+					}
+				}
 				s.reply(conn, "+OK goodbye")
 				return
 			}
-			marked := make([]string, 0)
-			for _, message := range session.messages {
-				if message.deleted {
-					marked = append(marked, message.id)
-				}
-			}
-			if len(marked) > 0 {
-				if err := s.store.DeleteForRecipient(context.Background(), session.lockedUser, marked); err != nil {
-					s.reply(conn, "-ERR could not commit deletions")
-					return
-				}
-			}
-			s.reply(conn, "+OK goodbye")
-			return
 		default:
 			s.reply(conn, "-ERR command not recognized")
 		}

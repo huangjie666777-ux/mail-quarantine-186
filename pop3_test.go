@@ -155,8 +155,9 @@ func TestPOP3Flow(t *testing.T) {
 	pop3Cmd(t, conn, reader, "+OK", "DELE 1\r\n")
 	pop3Cmd(t, conn, reader, "-ERR", "RETR 1\r\n")
 	pop3Cmd(t, conn, reader, "-ERR", "DELE 1\r\n")
+	pop3Cmd(t, conn, reader, "-ERR", "RSET extra\r\n")
 	if stat := pop3Cmd(t, conn, reader, "+OK", "STAT\r\n"); stat != fmt.Sprintf("+OK 1 %d\r\n", size2) {
-		t.Fatalf("STAT after DELE=%q", stat)
+		t.Fatalf("invalid RSET must not clear marks: %q", stat)
 	}
 	pop3Cmd(t, conn, reader, "+OK", "RSET\r\n")
 	if stat := pop3Cmd(t, conn, reader, "+OK", "STAT\r\n"); stat != fmt.Sprintf("+OK 2 %d\r\n", size1+size2) {
@@ -164,6 +165,7 @@ func TestPOP3Flow(t *testing.T) {
 	}
 	pop3Cmd(t, conn, reader, "+OK", "NOOP\r\n")
 	pop3Cmd(t, conn, reader, "+OK", "DELE 1\r\n")
+	pop3Cmd(t, conn, reader, "-ERR", "QUIT extra\r\n")
 	pop3Cmd(t, conn, reader, "+OK", "QUIT\r\n")
 
 	remaining, err := store.ListIDsForRecipient(context.Background(), recipient)
@@ -172,7 +174,7 @@ func TestPOP3Flow(t *testing.T) {
 	}
 
 	archive, err := store.ListByRecipient(context.Background(), recipient)
-	if err != nil || len(archive) != 1 {
+	if err != nil || len(archive) != 2 || archive[0].Status != StatusDelivered || archive[1].Status != StatusPOP3Deleted {
 		t.Fatalf("archive=%v err=%v", archive, err)
 	}
 }

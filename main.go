@@ -13,7 +13,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configuration: %v", err)
 	}
-	store, err := NewStore(config.DBPath)
+	store, err := NewStore(config.DBPath, config)
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}

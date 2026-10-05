@@ -218,7 +218,7 @@ func (s *SMTPServer) handle(conn net.Conn) {
 				if err != nil {
 					return
 				}
-				id, err := s.store.Save(context.Background(), session.sender, append([]string(nil), session.recipients...), raw)
+				id, err := s.store.SaveWithRules(context.Background(), session.sender, append([]string(nil), session.recipients...), raw)
 				if err != nil {
 					writeReply(conn, s.config.ReadTimeout, "451 could not store message")
 					return
@@ -241,8 +241,12 @@ func (s *SMTPServer) handle(conn net.Conn) {
 				reply = "250 OK"
 			}
 		case "QUIT":
-			reply = "221 bye"
-			closeAfter = true
+			if arguments != "" {
+				reply = "501 QUIT takes no arguments"
+			} else {
+				reply = "221 bye"
+				closeAfter = true
+			}
 		default:
 			reply = "500 command not recognized"
 		}

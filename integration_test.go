@@ -178,7 +178,7 @@ func TestIncompleteDataIsDiscardedAndRSETClearsEnvelope(t *testing.T) {
 	}
 
 	_, conn2, reader2 := dialSMTPServer(t, config, store)
-	sendSMTP(t, conn2, reader2, "250", "EHLO client.example\r\nRSET\r\n")
+	sendSMTP(t, conn2, reader2, "250", "EHLO client.example\r\nRSET extra parameters accepted\r\n")
 	ehloSecond, err := reader2.ReadString('\n')
 	if err != nil || !strings.HasPrefix(ehloSecond, "250 SIZE ") {
 		t.Fatalf("EHLO second=%q err=%v", ehloSecond, err)

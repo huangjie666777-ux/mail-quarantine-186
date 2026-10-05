@@ -158,13 +158,13 @@ func TestPOP3Flow(t *testing.T) {
 	if stat := pop3Cmd(t, conn, reader, "+OK", "STAT\r\n"); stat != fmt.Sprintf("+OK 1 %d\r\n", size2) {
 		t.Fatalf("STAT after DELE=%q", stat)
 	}
-	pop3Cmd(t, conn, reader, "+OK", "RSET\r\n")
+	pop3Cmd(t, conn, reader, "+OK", "RSET extra parameters accepted\r\n")
 	if stat := pop3Cmd(t, conn, reader, "+OK", "STAT\r\n"); stat != fmt.Sprintf("+OK 2 %d\r\n", size1+size2) {
 		t.Fatalf("STAT after RSET=%q", stat)
 	}
 	pop3Cmd(t, conn, reader, "+OK", "NOOP\r\n")
 	pop3Cmd(t, conn, reader, "+OK", "DELE 1\r\n")
-	pop3Cmd(t, conn, reader, "+OK", "QUIT\r\n")
+	pop3Cmd(t, conn, reader, "+OK", "QUIT extra parameters accepted\r\n")
 
 	remaining, err := store.ListIDsForRecipient(context.Background(), recipient)
 	if err != nil || len(remaining) != 1 || remaining[0].ID != ids[1] {
@@ -172,7 +172,11 @@ func TestPOP3Flow(t *testing.T) {
 	}
 
 	archive, err := store.ListByRecipient(context.Background(), recipient)
-	if err != nil || len(archive) != 1 {
+	statuses := map[string]string{}
+	for _, message := range archive {
+		statuses[message.ID] = message.Status
+	}
+	if err != nil || len(archive) != 2 || statuses[ids[0]] != "deleted" || statuses[ids[1]] != "deliverable" {
 		t.Fatalf("archive=%v err=%v", archive, err)
 	}
 }

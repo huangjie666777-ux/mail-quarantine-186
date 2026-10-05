@@ -1,6 +1,6 @@
 # SMTP 联调收信后端
 
-这是一个仅用于研发联调的本机 SMTP 收信、POP3 取信与只读 HTTP 查询服务。服务不向外转发邮件，也不解析或改写 MIME；`DATA` 中完成点透明解码后的原始字节会直接存入 SQLite。
+这是一个用于研发联调的本机 SMTP 收信、POP3 取信与 HTTP 归档/隔离处置服务。服务不向外转发邮件，也不解析或改写 MIME；`DATA` 中完成点透明解码后的原始字节会直接存入 SQLite。
 
 ## 配置
 
@@ -45,6 +45,8 @@ go run .
 - `DATA` 仅以独占一行的 `.` 加 CRLF 结束，并移除行首转义点。
 - 半封邮件断连、行过长或邮件过大时不保存；异常连接会被关闭。
 - 消息与收件人关联在同一个 SQLite 事务中提交，提交成功后才返回 `250`。
+- 服务在进入 `DATA` 时固定整份规则及版本；逐收件人独立匹配并在同一事务保存原信封、原文、命中规则、规则版本和该收件人的投递状态。
+- 没有命中规则时默认放行；命中隔离规则时 SMTP 仍返回成功，但该邮件仅对对应收件人暂时不可通过 POP3 取信。
 
 Python SMTP 客户端示例：
 
@@ -72,7 +74,8 @@ PY
 - `UIDL` 使用消息 ID，跨会话和重启稳定；`LIST`/`UIDL` 支持单条与整表。
 - `RETR` 返回原始邮件并做点透明转义，以 `.` 行结束；`STAT`/`LIST` 大小为原 CRLF 字节数，不含转义点和结束行。
 - `DELE` 仅做标记，后续查询排除但不重编号；`RSET` 撤销全部标记。
-- 仅认证后的 `QUIT` 会在单个 SQLite 事务中删除该收件人的标记项，失败回滚并报 `-ERR`；断连或超时不删除。同封邮件的其他收件人不受影响，HTTP 归档保留完整信封。
+- 仅认证后的 `QUIT` 会在单个 SQLite 事务中把该收件人的标记项置为 `deleted`，失败回滚并报 `-ERR`；断连或超时不删除。HTTP 归档和完整信封继续保留，之后不会重放。同封邮件的其他收件人不受影响。
+- 人工放行发生在旧 POP3 会话之外，不改变该会话已经冻结的快照；重新认证后邮件可见，UIDL 始终为消息 ID。
 - 命令必须严格 CRLF，支持分包和连续命令；连接数、行长和读取期限复用 `MAX_CONNECTIONS`、`MAX_LINE_BYTES`、`READ_TIMEOUT_SECONDS`。
 
 Python POP3 客户端示例：
@@ -93,7 +96,52 @@ PY
 ```
 ## HTTP API
 
-所有接口只接受 `GET`，不允许查询字符串。收件人必须在配置中，ID 必须是服务端生成的 32 位小写十六进制字符串。
+归档接口使用 `GET`，规则整表替换使用 `PUT`，人工处置使用 `POST`；所有接口均不允许查询字符串。收件人必须在配置中，ID 必须是服务端生成的 32 位小写十六进制字符串。
+
+### 隔离规则
+
+读取当前整表及版本：
+
+```sh
+curl -s 'http://127.0.0.1:8080/api/rules'
+```
+
+响应：
+
+```json
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "block-evil",
+      "recipient": "dev@example.com",
+      "sender_domain": "evil.example",
+      "action": "quarantine"
+    }
+  ]
+}
+```
+
+整表替换：
+
+```sh
+curl -s -X PUT 'http://127.0.0.1:8080/api/rules' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "expected_version": 0,
+    "rules": [
+      {"id":"block-evil","recipient":"dev@example.com","sender_domain":"evil.example","action":"quarantine"},
+      {"id":"allow-empty","recipient":"dev@example.com","sender_domain":"","action":"allow"},
+      {"id":"block-all","recipient":"qa.name@example.com","sender_domain":"*","action":"quarantine"}
+    ]
+  }'
+```
+
+- `expected_version` 必须等于当前版本；过期替换返回 `409` 和服务端当前版本，不修改任何规则。
+- 规则数组顺序即优先级，首条同时匹配收件地址和信封发件域的规则生效。
+- `id` 在一次提交中必须唯一；`recipient` 必须是允许收件地址。
+- `sender_domain` 大小写不敏感；`*` 匹配所有发件域且包含空发件人；空字符串只匹配空发件人。
+- `action` 为 `allow` 或 `quarantine`；默认（无命中）为放行。规则更新只影响后续邮件，不追溯重判历史邮件。
 
 列出某收件人的邮件元信息：
 
@@ -114,6 +162,44 @@ curl --output message.eml 'http://127.0.0.1:8080/api/recipients/dev@example.com/
 ```
 
 JSON 元信息包含：`id`、`received_at`、`sender`、`recipients`、`size`。
+
+归档元信息还会按该收件人返回 `status`、`action`、`rule_id`、`reason` 和人工处置时间 `decided_at`；`recipients` 始终保留完整原信封，即使某收件人后来取信删除也不改变其他收件人的归档。
+
+### 隔离处置
+
+列出当前仍待处理的隔离项：
+
+```sh
+curl -s 'http://127.0.0.1:8080/api/recipients/dev@example.com/quarantine'
+```
+
+按“邮件 ID + 收件人”放行或丢弃：
+
+```sh
+curl -s -X POST 'http://127.0.0.1:8080/api/recipients/dev@example.com/messages/<id>/release'
+curl -s -X POST 'http://127.0.0.1:8080/api/recipients/dev@example.com/messages/<id>/discard'
+```
+
+成功响应为持久状态和时间，例如：
+
+```json
+{"status":"released","decided_at":"2026-10-05T01:02:03.456789Z"}
+```
+
+- 只有 `quarantined` 项可转换；并发请求只允许一个决定落库。
+- 重复做相同决定是幂等的，返回同一个持久状态与时间。
+- 放行后再丢弃、或丢弃后再放行返回 `409`；非隔离项不能通过处置接口转换。
+- 丢弃后 POP3 永远不可见，但消息原文和完整信封仍可通过该收件人的 HTTP 归档查询。
+
+### 收件人状态
+
+| 状态 | 语义 | POP3 可见 |
+| --- | --- | --- |
+| `deliverable` | 默认放行或命中 `allow` | 是 |
+| `quarantined` | 命中隔离规则，等待人工处理 | 否 |
+| `released` | 人工放行，下一次认证进入快照 | 是 |
+| `discarded` | 人工丢弃，不删除归档 | 否 |
+| `deleted` | POP3 `QUIT` 后标记取信删除，不删除归档 | 否 |
 
 ## 开发验证
 

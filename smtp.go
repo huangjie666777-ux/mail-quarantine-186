@@ -211,6 +211,11 @@ func (s *SMTPServer) handle(conn net.Conn) {
 			} else if !session.senderSet || len(session.recipients) == 0 {
 				reply = "503 complete envelope first"
 			} else {
+				rules, ruleVersion, err := s.store.GetRules(context.Background())
+				if err != nil {
+					writeReply(conn, s.config.ReadTimeout, "451 could not load rules")
+					return
+				}
 				if writeReply(conn, s.config.ReadTimeout, "354 send mail content; end with .") {
 					return
 				}
@@ -218,7 +223,8 @@ func (s *SMTPServer) handle(conn net.Conn) {
 				if err != nil {
 					return
 				}
-				id, err := s.store.Save(context.Background(), session.sender, append([]string(nil), session.recipients...), raw)
+				id, err := s.store.SaveWithRules(context.Background(), session.sender,
+					append([]string(nil), session.recipients...), raw, rules, ruleVersion)
 				if err != nil {
 					writeReply(conn, s.config.ReadTimeout, "451 could not store message")
 					return
@@ -228,18 +234,11 @@ func (s *SMTPServer) handle(conn net.Conn) {
 				session.greeted = true
 			}
 		case "RSET":
-			if arguments != "" {
-				reply = "501 RSET takes no arguments"
-			} else {
-				session.resetEnvelope()
-				reply = "250 OK"
-			}
+			session.resetEnvelope()
+			session.greeted = true
+			reply = "250 OK"
 		case "NOOP":
-			if arguments != "" {
-				reply = "501 NOOP takes no arguments"
-			} else {
-				reply = "250 OK"
-			}
+			reply = "250 OK"
 		case "QUIT":
 			reply = "221 bye"
 			closeAfter = true
